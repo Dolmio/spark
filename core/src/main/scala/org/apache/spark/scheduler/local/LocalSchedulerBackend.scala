@@ -20,17 +20,19 @@ package org.apache.spark.scheduler.local
 import java.io.File
 import java.net.URL
 import java.nio.ByteBuffer
+import java.util.concurrent.TimeUnit
 
 import org.apache.spark.{SparkConf, SparkContext, SparkEnv, TaskState}
 import org.apache.spark.TaskState.TaskState
 import org.apache.spark.executor.{Executor, ExecutorBackend}
 import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.config.SCHEDULER_REVIVE_INTERVAL
 import org.apache.spark.launcher.{LauncherBackend, SparkAppHandle}
 import org.apache.spark.resource.{ResourceInformation, ResourceProfile}
 import org.apache.spark.rpc.{RpcCallContext, RpcEndpointRef, RpcEnv, ThreadSafeRpcEndpoint}
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.ExecutorInfo
-import org.apache.spark.util.Utils
+import org.apache.spark.util.{ThreadUtils, Utils}
 
 private case class ReviveOffers()
 
@@ -115,6 +117,9 @@ private[spark] class LocalSchedulerBackend(
     override def onStopRequest(): Unit = stop(SparkAppHandle.State.KILLED)
   }
 
+  private val reviveThread =
+    ThreadUtils.newDaemonSingleThreadScheduledExecutor("driver-revive-thread")
+
   /**
    * Returns a list of URLs representing the user classpath.
    *
@@ -138,9 +143,17 @@ private[spark] class LocalSchedulerBackend(
         Map.empty)))
     launcherBackend.setAppId(appId)
     launcherBackend.setState(SparkAppHandle.State.RUNNING)
+
+    // Periodically revive offers to allow delay scheduling to work
+    val reviveIntervalMs = conf.get(SCHEDULER_REVIVE_INTERVAL).getOrElse(1000L)
+
+    reviveThread.scheduleAtFixedRate(() => Utils.tryLogNonFatalError {
+      reviveOffers()
+    }, 0, reviveIntervalMs, TimeUnit.MILLISECONDS)
   }
 
   override def stop(): Unit = {
+    reviveThread.shutdownNow()
     stop(SparkAppHandle.State.FINISHED)
   }
 

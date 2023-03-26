@@ -351,6 +351,26 @@ class FileSourceStrategySuite extends QueryTest with SharedSparkSession {
     }
   }
 
+  test("Delay scheduling works with local mode and both local and remote locality files") {
+    // collect doesn't hang if fs.file.impl.disable.cache is false
+    withSQLConf(
+      SQLConf.FILES_MAX_PARTITION_BYTES.key -> "2",
+      "fs.file.impl" -> classOf[MockStaticDistributedFileSystem].getName,
+      "fs.file.impl.disable.cache" -> "true") {
+      val table = {
+        createTable(files = Seq(
+          "localFile" -> 1,
+          "remoteFile" -> 1,
+        ))
+
+      }
+      val results = table.collectAsList()
+      // Just test that the collectAsList returned
+      assert(results.size() == 0)
+    }
+  }
+
+
   test("SPARK-15654 do not split non-splittable files") {
     // Check if a non-splittable file is not assigned into partitions
     Seq("gz", "snappy", "lz4").foreach { suffix =>
@@ -756,6 +776,25 @@ class LocalityTestFileSystem extends RawLocalFileSystem {
     require(!file.isDirectory, "The file path can not be a directory.")
     val count = invocations.getAndAdd(1)
     Array(new BlockLocation(Array(s"host$count:50010"), Array(s"host$count"), 0, len))
+  }
+}
+
+class MockStaticDistributedFileSystem extends RawLocalFileSystem {
+
+  override def getFileBlockLocations(
+      file: FileStatus,
+      start: Long,
+      len: Long): Array[BlockLocation] = {
+    val localHostName = java.net.InetAddress.getLocalHost.getCanonicalHostName
+    if (file.getPath.getName.equals("localFile")) {
+      Array(new BlockLocation(Array(s"${localHostName}:50010"), Array(localHostName), 0, len))
+    } else if (file.getPath.getName.equals("remoteFile")) {
+      Array(new BlockLocation(Array(s"remoteHost:50010"), Array("remoteHost"), 0, len))
+    } else {
+      require(false, "File name must be either localFile or RemoteFile")
+      Array(
+        new BlockLocation(Array(s"assertFailedHost:50010"), Array("assertFailedHost"), 0, len))
+    }
   }
 }
 
